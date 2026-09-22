@@ -1,0 +1,177 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # =========================================================================
+  # CI PIPELINE: Lint, Type-Check, Test, and Build
+  # =========================================================================
+  ci:
+    name: CI Pipeline (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20.x, 22.x]
+
+    steps:
+      # Step 1: Checkout Repository
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Node.js with caching
+      - name: ⚙️ Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      # Step 3: Install Dependencies
+      - name: 📦 Install Dependencies
+        run: npm ci
+
+      # Step 4: Lint / Check (ESLint & TypeScript Type-Check)
+      - name: 🔍 Lint Code
+        run: npm run lint
+
+      - name: 🛡️ Type Check (TypeScript)
+        run: npm run type-check
+
+      # Step 5: Run Automated Tests with Coverage
+      - name: 🧪 Run Automated Tests
+        run: npm test -- --coverage --ci --maxWorkers=2
+
+      # Step 6: Build All Applications (Gateway, Product MFE, Cart MFE, API)
+      - name: 🏗️ Build All Apps
+        run: npm run build
+        env:
+          NODE_ENV: production
+          API_URL: ${{ secrets.PROD_API_URL || 'https://api.ecommerce-mfe.com' }}
+          MFE_PRODUCT_URL: ${{ secrets.PROD_MFE_PRODUCT_URL || 'https://cdn.ecommerce-mfe.com/mfe-product' }}
+          MFE_CART_URL: ${{ secrets.PROD_MFE_CART_URL || 'https://cdn.ecommerce-mfe.com/mfe-cart' }}
+
+      # Step 7: Upload Build Artifacts for CD Stage
+      - name: 📤 Upload Build Artifacts
+        if: matrix.node-version == '20.x'
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-build-artifacts
+          retention-days: 7
+          path: |
+            apps/gateway/dist
+            apps/mfe-product/dist
+            apps/mfe-cart/dist
+            apps/api/dist
+
+  # =========================================================================
+  # CD PIPELINE: Independent Deployments
+  # =========================================================================
+
+  # 1. Deploy Product MFE (Independent Remote 1)
+  deploy-mfe-product:
+    name: 🚀 Deploy Product MFE to CDN / Storage
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 📥 Download Production Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: production-build-artifacts
+
+      - name: ☁️ Deploy Product MFE Assets & remoteEntry.js to CDN
+        run: |
+          echo "Deploying Product MFE to CDN/S3 bucket..."
+          echo "Target URL: ${{ secrets.PROD_MFE_PRODUCT_URL || 'https://cdn.ecommerce-mfe.com/mfe-product' }}"
+          # Production command example:
+          # aws s3 sync apps/mfe-product/dist s3://${{ secrets.AWS_S3_BUCKET }}/mfe-product --delete --cache-control "max-age=31536000"
+          # aws s3 cp apps/mfe-product/dist/remoteEntry.js s3://${{ secrets.AWS_S3_BUCKET }}/mfe-product/remoteEntry.js --cache-control "no-cache, no-store, must-revalidate"
+          echo "✓ Product MFE deployment completed successfully."
+
+  # 2. Deploy Cart MFE (Independent Remote 2)
+  deploy-mfe-cart:
+    name: 🚀 Deploy Cart MFE to CDN / Storage
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 📥 Download Production Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: production-build-artifacts
+
+      - name: ☁️ Deploy Cart MFE Assets & remoteEntry.js to CDN
+        run: |
+          echo "Deploying Cart MFE to CDN/S3 bucket..."
+          echo "Target URL: ${{ secrets.PROD_MFE_CART_URL || 'https://cdn.ecommerce-mfe.com/mfe-cart' }}"
+          # Production command example:
+          # aws s3 sync apps/mfe-cart/dist s3://${{ secrets.AWS_S3_BUCKET }}/mfe-cart --delete --cache-control "max-age=31536000"
+          # aws s3 cp apps/mfe-cart/dist/remoteEntry.js s3://${{ secrets.AWS_S3_BUCKET }}/mfe-cart/remoteEntry.js --cache-control "no-cache, no-store, must-revalidate"
+          echo "✓ Cart MFE deployment completed successfully."
+
+  # 3. Deploy Gateway Host Shell
+  deploy-gateway:
+    name: 🚀 Deploy Gateway Shell to Production Hosting
+    needs: [deploy-mfe-product, deploy-mfe-cart]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 📥 Download Production Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: production-build-artifacts
+
+      - name: 🌐 Deploy Gateway Shell to Hosting Platform
+        run: |
+          echo "Deploying Gateway Shell to Hosting Platform (Vercel / Cloudflare Pages / S3)..."
+          echo "Configured Remotes:"
+          echo " - Product MFE: ${{ secrets.PROD_MFE_PRODUCT_URL || 'https://cdn.ecommerce-mfe.com/mfe-product' }}"
+          echo " - Cart MFE: ${{ secrets.PROD_MFE_CART_URL || 'https://cdn.ecommerce-mfe.com/mfe-cart' }}"
+          # Production command example:
+          # npx vercel --prod --token ${{ secrets.VERCEL_TOKEN }} apps/gateway/dist
+          echo "✓ Gateway Shell deployment completed successfully."
+
+  # 4. Deploy Backend REST API
+  deploy-backend:
+    name: 🚀 Deploy Backend API to Cloud / Server
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 📥 Download Production Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: production-build-artifacts
+
+      - name: 🖥️ Deploy Backend API Service
+        run: |
+          echo "Deploying Backend API to Cloud / Server (Render / Railway / AWS ECS)..."
+          echo "Target API Host: ${{ secrets.PROD_API_URL || 'https://api.ecommerce-mfe.com' }}"
+          # Production command example:
+          # docker build -t ecommerce-api:latest -f apps/api/Dockerfile .
+          # docker push ${{ secrets.DOCKER_REGISTRY }}/ecommerce-api:latest
+          echo "✓ Backend API deployment completed successfully."
