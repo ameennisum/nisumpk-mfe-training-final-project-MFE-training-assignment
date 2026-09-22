@@ -438,86 +438,148 @@ npm test
 
 ---
 
-## CI/CD
+## Part 14 — CI/CD Pipeline
 
-Automated CI is implemented using **GitHub Actions** in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+Automated Continuous Integration and Continuous Deployment (CI/CD) is implemented using **GitHub Actions** in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
-### Pipeline Stages:
-1. **Checkout Code**: Checks out repository.
-2. **Setup Node.js**: Matrix testing across Node.js `20.x` and `22.x`.
-3. **Install Dependencies**: Runs `npm ci`.
-4. **Linting**: Runs `npm run lint` (`eslint --max-warnings=0`).
-5. **Type Checking**: Runs `npm run type-check` (`tsc --noEmit`).
-6. **Automated Tests**: Runs `npm test -- --coverage`.
-7. **Production Builds**: Compiles and bundles all MFEs and backend (`npm run build`).
+### CI/CD Pipeline Flow
 
----
+```
+Git Push / Pull Request
+          │
+          ▼
+     Install Dependencies (npm ci)
+          │
+          ▼
+       Lint / Check (eslint & tsc --noEmit)
+          │
+          ▼
+       Run Tests (jest --coverage)
+          │
+          ▼
+        Build Apps (webpack & tsc)
+          │
+          ▼
+     Deployment (Independent targets)
+```
 
-## Environment Configuration
+### ⚙️ CI Requirements Implementation
 
-Configuration is managed through environment variables without hardcoded URLs:
+The CI workflow automatically triggers on every `push` and `pull_request` targeting `main`, `master`, or `develop` branches.
 
-| Variable | Default Value | Description |
+| Stage | Command | Purpose |
 |---|---|---|
-| `PORT` | `3000` | Backend API port |
-| `API_URL` | `http://localhost:3000` | URL for backend REST API |
-| `GATEWAY_PORT` | `4200` | Gateway Host port |
-| `MFE_PRODUCT_URL` | `http://localhost:4201` | Product Catalog MFE URL |
-| `MFE_CART_URL` | `http://localhost:4202` | Shopping Cart MFE URL |
-| `CORS_ORIGIN` | `http://localhost:4200,...` | Allowed CORS origins for API |
-
-Copy template to create local config:
-```bash
-cp .env.example .env
-```
+| **1. Install Dependencies** | `npm ci` | Clean, reproducible installation of all monorepo workspace dependencies with npm caching. |
+| **2. Lint / Check** | `npm run lint` & `npm run type-check` | Enforces zero-warning ESLint standards (`--max-warnings=0`) across `apps/` and `libs/`, and runs TypeScript type checking (`tsc --noEmit`). |
+| **3. Automated Tests** | `npm test -- --coverage --ci` | Executes Jest test suites across all MFEs, shared libraries, and backend API with code coverage tracking. |
+| **4. Production Build** | `npm run build` | Compiles and optimizes all applications (`apps/gateway`, `apps/mfe-product`, `apps/mfe-cart`, `apps/api`) into standalone production bundles in `dist/`. |
 
 ---
 
-## Running the Application
+### 🚀 CD Requirements & Production Deployment Strategy
 
-### Prerequisites
-- Node.js `v20.x` or `v22.x`
-- npm `v10.x` or higher
+The deployment stage is designed for **independent deployment** of each tier and micro frontend:
 
-### Single-Command Startup (Rule 7)
-Install dependencies and launch all 4 services concurrently with a single command:
-
-```bash
-npm install
-npm run dev
+```
+                  ┌───────────────────────┐
+                  │ Git Push / Release    │
+                  └──────────┬────────────┘
+                             │
+         ┌───────────────────┼───────────────────┐
+         ▼                   ▼                   ▼
+┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+│   Gateway Host  │ │   Product MFE   │ │    Cart MFE     │
+│  (Shell / Nav)  │ │   (Remote 1)    │ │   (Remote 2)    │
+└────────┬────────┘ └────────┬────────┘ └────────┬────────┘
+         │                   │                   │
+         ▼                   ▼                   ▼
+┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+│ Production Host │ │  CDN / S3 Bucket│ │  CDN / S3 Bucket│
+│(Vercel/Pages/S3)│ │(remoteEntry.js) │ │(remoteEntry.js) │
+└────────┬────────┘ └─────────────────┘ └─────────────────┘
+         │
+         │ Consumes Remotes dynamically at runtime
+         ▼
+┌─────────────────┐
+│   Backend API   │
+│ (Cloud / Server)│
+└─────────────────┘
 ```
 
-This starts:
-- ✓ **Backend API**: [http://localhost:3000](http://localhost:3000)
-- ✓ **Product Catalog MFE**: [http://localhost:4201](http://localhost:4201)
-- ✓ **Shopping Cart MFE**: [http://localhost:4202](http://localhost:4202)
-- ✓ **Gateway Shell (Main Entry)**: [http://localhost:4200](http://localhost:4200)
-
-### Individual App Scripts
-```bash
-npm run dev:gateway    # Starts Gateway Host only (Port 4200)
-npm run dev:product    # Starts Product MFE only (Port 4201)
-npm run dev:cart       # Starts Cart MFE only (Port 4202)
-npm run dev:api        # Starts Backend API only (Port 3000)
-```
+#### Production Deployment Targets:
+1. **Gateway Host Shell** (`@ecommerce/gateway`):
+   - **Target**: Production web hosting (e.g., Vercel, Cloudflare Pages, AWS S3 + CloudFront).
+   - **Artifact**: `apps/gateway/dist/`
+   - **Configuration**: Injected with remote URLs (`MFE_PRODUCT_URL`, `MFE_CART_URL`) and backend endpoint (`API_URL`).
+2. **Product Catalog MFE** (`@ecommerce/mfe-product`):
+   - **Target**: Static storage / Global CDN (e.g., AWS S3 + CloudFront, Akamai).
+   - **Artifact**: `apps/mfe-product/dist/` (includes `remoteEntry.js` and component chunks).
+   - **Caching Strategy**: `remoteEntry.js` has `Cache-Control: no-cache, no-store, must-revalidate`; versioned chunks have long-term immutable caching (`max-age=31536000`).
+3. **Shopping Cart MFE** (`@ecommerce/mfe-cart`):
+   - **Target**: Static storage / Global CDN (e.g., AWS S3 + CloudFront).
+   - **Artifact**: `apps/mfe-cart/dist/` (includes `remoteEntry.js` and component chunks).
+4. **Backend REST API** (`@ecommerce/api`):
+   - **Target**: Cloud container service (e.g., AWS ECS, Render, Railway, Kubernetes).
+   - **Artifact**: Node.js service compiled in `apps/api/dist/`.
 
 ---
 
-## Deployment
+## Part 15 — Independent Deployment
 
-### Independent Deployment Strategy
-In production, each MFE is packaged and deployed independently:
-1. **Remotes Deployment (`mfe-product`, `mfe-cart`)**:
-   - Bundled via `npm run build -w @ecommerce/mfe-product`.
-   - Assets and `remoteEntry.js` uploaded to CDN / S3 bucket with CORS headers enabled.
-   - Example URLs: `https://cdn.example.com/mfe-product/remoteEntry.js`.
-2. **Gateway Deployment (`gateway`)**:
-   - Reads remote entry URLs from environment variables (`MFE_PRODUCT_URL`, `MFE_CART_URL`) at build or runtime.
-   - Deployed to modern hosting (Vercel, AWS CloudFront, Nginx).
-3. **Backend API**:
-   - Containerized or deployed to cloud app services (AWS ECS, Render, Railway).
-4. **Zero Downtime Updates**:
-   Because the Gateway dynamically loads `remoteEntry.js` on user requests, updates to `mfe-product` or `mfe-cart` are immediately consumed by users on page load without requiring a redeployment or restart of the Gateway Shell.
+Our architecture decouples each application so that micro frontends and backend services can be deployed, scaled, and updated completely independently without coordinated releases:
+
+```
+Gateway Host Shell  ───► Version 1.0 (Infrequent structural updates)
+Product MFE         ───► Version 1.4 (Active feature iterations & filters)
+Cart MFE            ───► Version 2.1 (Checkout flow redesign)
+Backend REST API    ───► Version 3.0 (Data model optimization)
+```
+
+### 1. How Remote URLs are Configured
+- **Environment Variables**: Remotes are declared in `.env` or system environment variables:
+  - `MFE_PRODUCT_URL=https://cdn.ecommerce.com/mfe-product`
+  - `MFE_CART_URL=https://cdn.ecommerce.com/mfe-cart`
+- **Build-Time Ingestion**: Webpack reads `process.env.MFE_PRODUCT_URL` and `process.env.MFE_CART_URL` via `dotenv` and configures the `ModuleFederationPlugin`:
+  ```javascript
+  new ModuleFederationPlugin({
+    name: 'gateway',
+    remotes: {
+      mfe_product: `mfe_product@${MFE_PRODUCT_URL}/remoteEntry.js`,
+      mfe_cart: `mfe_cart@${MFE_CART_URL}/remoteEntry.js`
+    }
+  })
+  ```
+- **Runtime Discovery Flexibility**: The host can also consume a dynamic discovery manifest (`window.__MFE_CONFIG__` or a `/api/discovery` endpoint) to resolve remote URLs at runtime without rebuilding the Gateway shell.
+
+### 2. How the Gateway Discovers Remotes
+- **Container Interface**: When the Gateway needs to render a remote component (e.g., `import('mfe_product/ProductList')`), Webpack's Module Federation runtime dynamically injects a `<script>` tag referencing the remote's `remoteEntry.js`.
+- **Manifest Loading**: The remote entry script initializes the remote container on the global window scope (e.g., `window.mfe_product`).
+- **Dependency Sharing Negotiation**: The container calls `init(sharedScope)` to negotiate shared singleton dependencies (`react`, `react-dom`, `zustand`, `@ecommerce/*`).
+- **Chunk Resolution**: The Gateway calls `get('./ProductList')` on the remote container, which dynamically downloads only the required JavaScript/CSS chunks and mounts the component into the Gateway DOM.
+
+### 3. What Happens When a Remote is Unavailable
+- **Granular Error Isolation**: Each remote component is wrapped in a dedicated `RemoteBoundary` component:
+  ```tsx
+  <RemoteBoundary remoteName="Product Catalog" expectedUrl={MFE_PRODUCT_URL}>
+    <ProductList />
+  </RemoteBoundary>
+  ```
+- **Fault Tolerance**:
+  - **No Application-Wide Crash**: If `mfe-product` or `mfe-cart` goes down (e.g., 404, 500, DNS failure, or network partition), the error is caught by React Error Boundary.
+  - **Fallback UI**: The user sees an informative banner ("*Unable to load Remote Micro Frontend: Product Catalog*") with connection details.
+  - **Retry Capability**: An interactive **"Retry Connection"** button allows users to retry loading the remote once the service recovers without refreshing the entire page.
+  - **Shell & Peer Continuity**: The Gateway header, navigation, currency selector, and all other functional MFEs remain 100% operational.
+
+### 4. How Version Compatibility is Handled
+- **Module Federation Shared Singletons**:
+  - `react` and `react-dom` are configured with `{ singleton: true, requiredVersion: '^18.3.1', eager: false }`.
+  - If a remote requires a compatible minor/patch version, Webpack reuses the host's existing singleton in memory.
+  - If incompatible major versions are detected, Module Federation falls back to loading the required version in isolation or issues a clear semver warning.
+- **Contract-Based Decoupled Communication (`window.NISUM`)**:
+  - MFEs do not import code directly from each other. Communication happens exclusively via standard browser CustomEvents using the typed `NISUM` event bus.
+  - Event payloads are designed to be **backward-compatible** and additive (e.g., adding an optional `discount` property to `cart:item-added` does not break older cart consumers).
+- **Independent Release Lifecycles**:
+  - A bug fix or UI enhancement in `mfe-product` (v1.4) can be deployed to the CDN in seconds without touching `mfe-cart` or `gateway`. Customers immediately receive the new version on their next page navigation.
 
 ---
 
